@@ -5,6 +5,7 @@
 #include <atomic>
 #include <thread>
 #include <functional>
+#include <random>
 #include "gtest/gtest.h"
 #include "../Semaphore.h"
 
@@ -12,53 +13,47 @@ class SemaphoreTest : public ::testing::Test {
 
 protected:
 
-    void SetUp() override {
-        counter = 0;
-        semaphore = new CountingSemaphore;
+    /// This method can be called by create some threads calling a function repeatedly
+    ///
+    /// \param test_function The function that will be called by the threads
+    /// \param more_acquires Argument passed to the function
+    /// \param try_acquire Argument passed to the function
+    /// \param operations Number of times the function is called
+    /// \return True if the counter is correct (>= 0), False otherwise
+    bool test_using(
+        std::function<void(CountingSemaphore&, std::atomic<int>&, bool, bool)> test_function,
+        bool more_acquires,
+        bool try_acquire,
+        int operations) {
+
         threads.reserve(kThreads);
-        counter_mutex = new std::mutex;
-    }
-
-    void TearDown() override {
-        delete semaphore;
-        delete counter_mutex;
-    }
-
-    //generates the function run by the threads
-    bool test_using(std::function<void(CountingSemaphore*, std::atomic<int>&, std::mutex*, bool, bool)> test_function, bool more_acquires, bool try_acquire) {
 
         for (int t=0; t<kThreads; t++) {
-            threads.push_back(new std::thread([&, more_acquires, try_acquire](){
-                std::this_thread::sleep_for(std::chrono::milliseconds (t));
-                for (int i=0; i<100; i++) {
-                    test_function(semaphore, counter, counter_mutex, more_acquires, try_acquire);
-                    std::this_thread::sleep_for(std::chrono::milliseconds (10));
-                }
-            }));
+            threads.emplace_back([&, more_acquires, try_acquire](){
+                for (int i=0; i<operations; i++)
+                    test_function(semaphore, counter, more_acquires, try_acquire);
+            });
         }
 
-        bool correct = true;
-        std::thread checker([&] () {
-            for (int i = 0; i < 1000; i++) {
-                std::unique_lock<std::mutex> lk(*counter_mutex);
-                correct &= counter >= 0;
-                std::this_thread::sleep_for(std::chrono::milliseconds (1));
-            }
-        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-        checker.join();
+        for (auto& t:threads)
+            t.detach();
 
-        return correct;
-
+        std::cerr<<counter<<std::endl;
+        return counter >= 0;
     }
 
     std::atomic<int> counter = 0;
     const int kThreads = 5;
-    std::vector<std::thread*> threads;
-    CountingSemaphore* semaphore = nullptr;
-    std::mutex* counter_mutex;
+    CountingSemaphore semaphore;
+    std::vector<std::thread> threads;
 
 };
+
+std::random_device rd;
+std::mt19937 gen(rd());
+std::uniform_int_distribution<> dist(0, 99);
 
 /// Function used by the threads to test the semaphore.
 ///
@@ -67,43 +62,47 @@ protected:
 /// \param more_acquires If true, function does more acquires then releases (80% - 20%).
 /// If false, it does approximately the same number (50% - 50%).
 /// \param try_acquire If true uses try_acquire (non-blocking). If false uses acquire (blocking).
-void random_release_or_acquire(CountingSemaphore* s, std::atomic<int>& counter, std::mutex* m, bool more_acquires, bool try_acquire) {
-    std::unique_lock<std::mutex> lk(*m);
-    if (rand()%100 < (more_acquires ? 80 : 50)) {
-        if (try_acquire and s->try_acquire()) {
+void random_release_or_acquire(CountingSemaphore& s, std::atomic<int>& counter, bool more_acquires, bool try_acquire) {
+    if (dist(gen)%100 < (more_acquires ? 80 : 40)) {
+        if (try_acquire and s.try_acquire()) {
             counter--;
         }
         if (!try_acquire) {
-            s->acquire();
+            s.acquire();
             counter--;
         }
     } else {
-        s->release();
+        s.release();
         counter++;
     }
 }
 
-// Test with more_acquires: true and try_acquire: true (see random_release_or_acquire documentation)
-TEST_F(SemaphoreTest, semaphore_MoreAcquires_TryAcquire) {
-    bool correct = test_using(random_release_or_acquire, true, true);
-    ASSERT_TRUE(correct);
+
+// Tests with more_acquires: true and try_acquire: true (see random_release_or_acquire documentation)
+TEST_F(SemaphoreTest, semaphore_MoreAcquires_TryAcquire_FewOperations) {
+    ASSERT_TRUE(test_using(random_release_or_acquire, true, true, 100));
 }
 
-// Test with more_acquires: false and try_acquire: true (see random_release_or_acquire documentation)
-TEST_F(SemaphoreTest, semaphore_noMoreAcquires_TryAcquire) {
-    bool correct = test_using(random_release_or_acquire, false, false);
-    ASSERT_TRUE(correct);
-}
-
-// Test with more_acquires: true and try_acquire: false (see random_release_or_acquire documentation)
-TEST_F(SemaphoreTest, semaphore_MoreAcquires_noTryAcquire) {
-    bool correct = test_using(random_release_or_acquire, true, false);
-    ASSERT_TRUE(correct);
+TEST_F(SemaphoreTest, semaphore_MoreAcquires_TryAcquire_ManyOperations) {
+    ASSERT_TRUE(test_using(random_release_or_acquire, true, true, 100000));
 }
 
 
-// Test with more_acquires: false and try_acquire: false (see random_release_or_acquire documentation)
-TEST_F(SemaphoreTest, semaphore_noMoreAcquires_noTryAcquire) {
-    bool correct = test_using(random_release_or_acquire, false, false);
-    ASSERT_TRUE(correct);
+// Tests with more_acquires: false and try_acquire: true (see random_release_or_acquire documentation)
+TEST_F(SemaphoreTest, semaphore_noMoreAcquires_TryAcquire_FewOperations) {
+    ASSERT_TRUE(test_using(random_release_or_acquire, false, true, 100));
+}
+
+TEST_F(SemaphoreTest, semaphore_noMoreAcquires_TryAcquire_ManyOperations) {
+    ASSERT_TRUE(test_using(random_release_or_acquire, false, true, 100000));
+}
+
+
+// Tests with more_acquires: false and try_acquire: false (see random_release_or_acquire documentation)
+TEST_F(SemaphoreTest, semaphore_noMoreAcquires_noTryAcquire_FewOperations) {
+    ASSERT_TRUE(test_using(random_release_or_acquire, false, false, 100));
+}
+
+TEST_F(SemaphoreTest, semaphore_noMoreAcquires_noTryAcquire_ManyOperations) {
+    ASSERT_TRUE(test_using(random_release_or_acquire, false, false, 100000));
 }
