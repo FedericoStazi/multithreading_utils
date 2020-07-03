@@ -23,7 +23,6 @@ protected:
     }
 
     /// This method can be called by create some threads calling a function repeatedly
-    ///
     /// \param test_function The function that will be called by the threads
     /// \param more_acquires Argument passed to the function
     /// \param try_acquire Argument passed to the function
@@ -58,48 +57,51 @@ protected:
         return counter >= 0;
     }
 
+    CountingSemaphore semaphore;
     std::atomic<int> counter = 0;
     const int kThreads = 5;
-    CountingSemaphore semaphore;
     std::vector<std::thread> threads;
 
 };
 
+constexpr int few_operations = 100;
+constexpr int many_operations = 10000;
+
 // Tests with more_acquires: true and try_acquire: true (see random_release_or_acquire documentation)
 TEST_F(SemaphoreTest, semaphore_MoreAcquires_TryAcquire_FewOperations) {
-    ASSERT_TRUE(test_using(true, true, 100));
+    ASSERT_TRUE(test_using(true, true, few_operations));
 }
 
 TEST_F(SemaphoreTest, semaphore_MoreAcquires_TryAcquire_ManyOperations) {
-    ASSERT_TRUE(test_using(true, true, 10000));
+    ASSERT_TRUE(test_using(true, true, many_operations));
 }
 
 
 // Tests with more_acquires: false and try_acquire: true (see random_release_or_acquire documentation)
 TEST_F(SemaphoreTest, semaphore_LessAcquires_TryAcquire_FewOperations) {
-    ASSERT_TRUE(test_using(false, true, 100));
+    ASSERT_TRUE(test_using(false, true, few_operations));
 }
 
 TEST_F(SemaphoreTest, semaphore_LessAcquires_TryAcquire_ManyOperations) {
-    ASSERT_TRUE(test_using(false, true, 10000));
+    ASSERT_TRUE(test_using(false, true, many_operations));
 }
 
 
 // Tests with more_acquires: true and try_acquire: false (see random_release_or_acquire documentation)
 TEST_F(SemaphoreTest, semaphore_MoreAcquires_noTryAcquire_FewOperations) {
-    ASSERT_TRUE(test_using(true, false, 100));
+    ASSERT_TRUE(test_using(true, false, few_operations));
 }
 
 TEST_F(SemaphoreTest, semaphore_MoreAcquires_noTryAcquire_ManyOperations) {
-    ASSERT_TRUE(test_using(true, false, 10000));
+    ASSERT_TRUE(test_using(true, false, many_operations));
 }
 
 
 // Tests with more_acquires: false and try_acquire: false (see random_release_or_acquire documentation)
 TEST_F(SemaphoreTest, semaphore_LessAcquires_noTryAcquire_FewOperations) {
-    ASSERT_TRUE(test_using(false, false, 100));
+    ASSERT_TRUE(test_using(false, false, few_operations));
 }
 
 TEST_F(SemaphoreTest, semaphore_LessAcquires_noTryAcquire_ManyOperations) {
-    ASSERT_TRUE(test_using(false, false, 10000));
+    ASSERT_TRUE(test_using(false, false, many_operations));
 }
