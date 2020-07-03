@@ -63,8 +63,8 @@ private:
     /// Releases (value > 0) or acquires (value < 0) the semaphore's resources by value.
     /// This means increasing the counter by value (therefore decreasing it if value < 0)
     /// \tparam ReturnType This can only be void or bool.
-    /// If void, the function waits for the resources if they are not immediately available.
-    /// If bool, the function tries acquiring the resources once and then returns.
+    /// If void, the method waits for the resources if they are not immediately available.
+    /// If bool, the method tries acquiring the resources once and then returns.
     /// \param value The amount of resources to be released (value > 0) or released (value < 0).
     /// \return If ReturnType is bool, returns true if the resources were released or acquired, false otherwise.
     template<class ReturnType>
@@ -88,44 +88,64 @@ using CountingSemaphore = Semaphore<>;
 /// The number of resources is always 0 or 1.
 using BinarySemaphore = Semaphore<1>;
 
-// implementation of Semaphore's update function
+// Implementation of Semaphore's update method
 template<std::ptrdiff_t max_count>
 template<class ReturnType>
 ReturnType Semaphore<max_count>::update(int value) {
 
+    // Checking at compile time that ReturnType is void or bool
     static_assert(
         std::is_same<ReturnType, void>::value or std::is_same<ReturnType, bool>::value,
         "ReturnType can only be void (for waiting update) or bool (for non-waiting update)");
+    
+    // True if the method should wait for the resources.
+    // False if it should only try once (and return false if resources are missing, true otherwise).
     constexpr bool waiting = std::is_void<ReturnType>::value;
 
+    // References to the queues. These are used to avoid duplicate code.
+    // (the sign of value only changes the queues accessed by this method)
     WaitingThreadsQueue &this_queue = (value > 0) ? release_queue : acquire_queue;
     WaitingThreadsQueue &other_queue = (value > 0) ? acquire_queue : release_queue;
 
     // WaitingThread created on the heap.
-    // Otherwise th object created by a later killed thread would not be destroyed correctly
+    // Otherwise the object created by a later killed thread would not be destroyed correctly.
     WaitingThread* wt = new WaitingThread();
+    
+    // Variable returned if waiting is false.
     bool updated = true;
 
+    // Push WaitingThread in the queue (in different ways depending on waiting).
     if constexpr (waiting)
         this_queue.push(wt);
     else if (!this_queue.push_if_empty(wt))
         return false;
 
     {
+        // Lock this thread's mutex
         std::unique_lock<std::mutex> lk(wt->mutex);
-        while (!((counter + value >= 0 and counter + value <= max() and wt->turn) or this_queue.is_clearing())) {
+
+        // If waiting = true, check the condition and wait for a notification if it does not hold.
+        // If waiting = false, check the condition once and set updated = false if it does not hold.
+        while (!((counter + value >= 0 and counter + value <= max() and wt->first) or this_queue.is_clearing())) {
             if constexpr (!waiting) {
                 updated = false;
                 break;
             }
             wt->condition_variable.wait(lk);
         }
+
+        // Increase counter if the condition holds.
         if (updated)
             counter += value;
+
         assert((counter >= 0 and counter <= max()) or this_queue.is_clearing());
     }
 
+    // Pop the thread from the queue.
     this_queue.pop();
+
+    // Notify the other queue.
+    // (maybe the operation has released or acquired enough resources for a thread on the other queue)
     other_queue.notify_first();
 
     delete wt;

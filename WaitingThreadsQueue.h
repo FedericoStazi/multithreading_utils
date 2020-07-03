@@ -16,19 +16,20 @@ struct WaitingThread {
     /// mutex used by condition_variable.
     std::mutex mutex;
 
-    /// condition_variable that is notified when it is this thread's turn (i.e. it is the first in its queue).
+    /// condition_variable that is notified when this thread becomes the first in its queue.
     std::condition_variable condition_variable;
 
-    /// boolean variable true if and only if this thread is the first in its queue.
-    bool turn;
+    /// bool variable true if and only if this thread is the first in its queue.
+    /// By default it is false.
+    bool first = false;
 
 };
 
 /// Object representing a queue of pointers to waiting threads.
 /// All the methods provided are atomic.
-/// The main invariants of this data structure are:
-/// - turn true
-/// - cv notified
+/// When the queue's mutex is unlocked, these invariants hold:
+/// - The field first on the first WaitingThread on the queue is true, false for the other WaitingThreads.
+/// - When a WaitingThread gets into the first position, its condition_variable is notified.
 class WaitingThreadsQueue {
 
 public:
@@ -62,30 +63,30 @@ public:
         std::lock_guard<std::mutex> lk(mutex);
         queue.pop();
         if (!queue.empty()) {
-            queue.front()->turn = true;
+            queue.front()->first = true;
             queue.front()->condition_variable.notify_one();
         }
     }
 
     /// @brief Pushes a thread in the queue.
-    /// Atomically pushes a WaitingThread pointer in the queue and sets turn to true if it is the first.
+    /// Atomically pushes a WaitingThread pointer in the queue and sets first to true if it is the first.
     /// \param wt pointer to the WaitingThread object.
     void push(WaitingThread* wt) {
         std::lock_guard<std::mutex> tlk(mutex);
         if(queue.empty())
-            wt->turn = true;
+            wt->first = true;
         queue.push(wt);
     }
 
     /// @brief Pushes a thread in the queue if it is empty.
-    /// Atomically pushes a WaitingThread pointer in the queue if it is empty, and sets turn to true.
+    /// Atomically pushes a WaitingThread pointer in the queue if it is empty, and sets first to true.
     /// \param wt pointer to the WaitingThread object.
     /// \return true if the thread was pushed, false otherwise.
     bool push_if_empty(WaitingThread* wt) {
         std::lock_guard<std::mutex> tlk(mutex);
         if (!queue.empty())
             return false;
-        wt->turn = true;
+        wt->first = true;
         queue.push(wt);
         return true;
     }
