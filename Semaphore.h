@@ -38,7 +38,7 @@ public:
     void release(int value = 1) {
         assert(inside_bounds(value));
         if (value != 0)
-            update<void>(value);
+            update(value);
     }
 
     /// @brief Acquires a resource.
@@ -48,7 +48,7 @@ public:
     void acquire(int value = 1) {
         assert(inside_bounds(value));
         if (value != 0)
-            update<void>(-value);
+            update(-value);
     }
 
     /// @brief Tries releasing a resource.
@@ -59,7 +59,7 @@ public:
     bool try_release(int value = 1) {
         if (value == 0) return true;
         assert(inside_bounds(value));
-        return update<bool>(value);
+        return try_update(value);
     }
 
     /// @brief Tries acquiring a resource.
@@ -70,7 +70,7 @@ public:
     bool try_acquire(int value = 1) {
         if (value == 0) return true;
         assert(inside_bounds(value));
-        return update<bool>(-value);
+        return try_update(-value);
     }
 
     /// @brief Clears the semaphore's queues.
@@ -92,19 +92,24 @@ private:
     /// Checks if value is between 0 and max_count (0 <= value and value <= max_count).
     /// \param value Value to be checked.
     /// \return True if value is between 0 and max_count, false otherwise.
-    inline bool inside_bounds(int value) const { return 0 <= value and value <= max_count; }
+    inline bool inside_bounds(int value) const { return 0 <= value and value <= max(); }
 
-    /// @brief Releases or acquires the semaphore's resources.
+    /// @brief Releases or acquires the semaphore's resources, waiting if not available.
     /// Releases (value > 0) or acquires (value < 0) the semaphore's resources by value.
     /// This means increasing the counter by value (therefore decreasing it if value < 0).
-    /// value must not be 0.
-    /// \tparam ReturnType This can only be void or bool.
-    /// If void, the method waits for the resources if they are not immediately available.
-    /// If bool, the method tries acquiring the resources once and then returns.
-    /// \param value The amount of resources to be released (value > 0) or released (value < 0).
-    /// \return If ReturnType is bool, returns true if the resources were released or acquired, false otherwise.
-    template<class ReturnType>
-    ReturnType update(int value);
+    /// (value must not be 0).
+    /// This method waits for the resources if they are not immediately available.
+    /// \param value The amount of resources to be released (value > 0) or acquired (value < 0).
+    void update(int value);
+
+    /// @brief Releases or acquires the semaphore's resources, returning false if not available.
+    /// Releases (value > 0) or acquires (value < 0) the semaphore's resources by value.
+    /// This means increasing the counter by value (therefore decreasing it if value < 0).
+    /// (value must not be 0).
+    /// This method tries acquiring the resources once and then returns.
+    /// \param value The amount of resources to be released (value > 0) or acquired (value < 0).
+    /// \return Returns true if the resources were released or acquired, false otherwise.
+    bool try_update(int value);
 
     /// Queues containing the threads waiting to release or acquire resources respectively.
     WaitingThreadsQueue release_queue, acquire_queue;
@@ -129,55 +134,33 @@ using BinarySemaphore = Semaphore<1>;
 
 // Implementation of Semaphore's update method
 template<std::ptrdiff_t max_count>
-template<class ReturnType>
-ReturnType Semaphore<max_count>::update(int value) {
+void Semaphore<max_count>::update(int value) {
 
-    // Checking at compile time that ReturnType is void or bool
-    static_assert(
-        std::is_same<ReturnType, void>::value or std::is_same<ReturnType, bool>::value,
-        "ReturnType can only be void (for waiting update) or bool (for non-waiting update)");
-    
-    // True if the method should wait for the resources.
-    // False if it should only try once (and return false if resources are missing, true otherwise).
-    constexpr bool waiting = std::is_void<ReturnType>::value;
+    assert(value != 0);
 
     // References to the queues. These are used to avoid duplicate code.
     // (the sign of value only changes the queues accessed by this method)
-    assert(value != 0);
     WaitingThreadsQueue &this_queue = (value > 0) ? release_queue : acquire_queue;
     WaitingThreadsQueue &other_queue = (value > 0) ? acquire_queue : release_queue;
 
     // WaitingThread created on the heap.
     // Otherwise the object created by a later killed thread would not be destroyed correctly.
     std::unique_ptr<WaitingThread> wt(new WaitingThread());
-    
-    // Variable returned if waiting is false.
-    bool updated = true;
 
     // Push WaitingThread in the queue (in different ways depending on waiting).
-    if constexpr (waiting)
-        this_queue.push(wt.get());
-    else if (!this_queue.push_if_empty(wt.get()))
-        return false;
+    this_queue.push(wt.get());
 
     {
         // Lock this thread's mutex
         std::unique_lock<std::mutex> lk(wt->mutex);
 
-        // If waiting = true, check the condition and wait for a notification if it does not hold.
-        // If waiting = false, check the condition once and set updated = false if it does not hold.
-        while (!((inside_bounds(counter + value) and wt->first) or this_queue.is_clearing())) {
-            if constexpr (!waiting) {
-                updated = false;
-                break;
-            }
-            wt->condition_variable.wait(lk);
-        }
+        // Wait for the variable to be notified when then condition holds (safe against spurious updates).
+        wt->condition_variable.wait(lk, [&](){
+            return (inside_bounds(counter + value) and wt->first) or this_queue.is_clearing();
+        });
 
-        // Increase counter if the condition holds.
-        if (updated)
-            counter += value;
-
+        // Update counter
+        counter += value;
         assert((inside_bounds(counter)) or this_queue.is_clearing());
     }
 
@@ -188,8 +171,50 @@ ReturnType Semaphore<max_count>::update(int value) {
     // (maybe the operation has released or acquired enough resources for a thread on the other queue)
     other_queue.notify_first();
 
-    if constexpr (!waiting)
-        return updated;
+}
+
+// Implementation of Semaphore's update method
+template<std::ptrdiff_t max_count>
+bool Semaphore<max_count>::try_update(int value) {
+
+    assert(value != 0);
+
+    // References to the queues. These are used to avoid duplicate code.
+    // (the sign of value only changes the queues accessed by this method)
+    WaitingThreadsQueue &this_queue = (value > 0) ? release_queue : acquire_queue;
+    WaitingThreadsQueue &other_queue = (value > 0) ? acquire_queue : release_queue;
+
+    // WaitingThread created on the heap.
+    // Otherwise the object created by a later killed thread would not be destroyed correctly.
+    std::unique_ptr<WaitingThread> wt(new WaitingThread());
+
+    // Push WaitingThread in the queue and returning false if it is empty
+    if (!this_queue.push_if_empty(wt.get()))
+        return false;
+
+    bool can_update;
+
+    {
+        // Lock this thread's mutex
+        std::unique_lock<std::mutex> lk(wt->mutex);
+
+        // check the condition once and set can_update = false if it does not hold.
+        can_update = (inside_bounds(counter + value) and wt->first) or this_queue.is_clearing();
+
+        // Update counter if the condition holds.
+        if (can_update)
+            counter += value;
+        assert((inside_bounds(counter)) or this_queue.is_clearing());
+    }
+
+    // Pop the thread from the queue.
+    this_queue.pop();
+
+    // Notify the other queue.
+    // (maybe the operation has released or acquired enough resources for a thread on the other queue)
+    other_queue.notify_first();
+
+    return can_update;
 
 }
 
