@@ -123,7 +123,7 @@ private:
 /// Internally stores a counter that can be increased or decreased by different threads.
 /// The number of resources is always greater than or equal to 0.
 /// @attention Threads are executed with a FIFO ordering.
-/// This means that, for example, a thread waiting for many resources will be given prioirty over all threads coming
+/// This means that, for example, a thread waiting for many resources will be given priority over all threads coming
 /// later, even those that need less resources and could immediately return.
 using CountingSemaphore = Semaphore<>;
 
@@ -136,40 +136,19 @@ using BinarySemaphore = Semaphore<1>;
 template<std::ptrdiff_t max_count>
 void Semaphore<max_count>::update(int value) {
 
-    assert(value != 0);
-
     // References to the queues. These are used to avoid duplicate code.
     // (the sign of value only changes the queues accessed by this method)
     WaitingThreadsQueue &this_queue = (value > 0) ? release_queue : acquire_queue;
     WaitingThreadsQueue &other_queue = (value > 0) ? acquire_queue : release_queue;
 
-    // WaitingThread created on the heap.
-    // Otherwise the object created by a later killed thread would not be destroyed correctly.
-    std::unique_ptr<WaitingThread> wt(new WaitingThread());
-
-    // Push WaitingThread in the queue (in different ways depending on waiting).
-    this_queue.push(wt.get());
-
     {
-        // Lock this thread's mutex
-        std::unique_lock<std::mutex> lk(wt->mutex);
-
-        // Wait for the variable to be notified when then condition holds (safe against spurious updates).
-        wt->condition_variable.wait(lk, [&](){
-            return (inside_bounds(counter + value) and wt->first) or this_queue.is_clearing();
-        });
-
-        // Update counter
+        auto g = this_queue.waiting_guard([&](){ return inside_bounds(counter + value); });
         counter += value;
-        assert((inside_bounds(counter)) or this_queue.is_clearing());
     }
-
-    // Pop the thread from the queue.
-    this_queue.pop();
 
     // Notify the other queue.
     // (maybe the operation has released or acquired enough resources for a thread on the other queue)
-    other_queue.notify_first();
+    other_queue.notify();
 
 }
 
@@ -177,42 +156,23 @@ void Semaphore<max_count>::update(int value) {
 template<std::ptrdiff_t max_count>
 bool Semaphore<max_count>::try_update(int value) {
 
-    assert(value != 0);
-
     // References to the queues. These are used to avoid duplicate code.
     // (the sign of value only changes the queues accessed by this method)
     WaitingThreadsQueue &this_queue = (value > 0) ? release_queue : acquire_queue;
     WaitingThreadsQueue &other_queue = (value > 0) ? acquire_queue : release_queue;
 
-    // WaitingThread created on the heap.
-    // Otherwise the object created by a later killed thread would not be destroyed correctly.
-    std::unique_ptr<WaitingThread> wt(new WaitingThread());
-
-    // Push WaitingThread in the queue and returning false if it is empty
-    if (!this_queue.push_if_empty(wt.get()))
-        return false;
-
     bool can_update;
 
     {
-        // Lock this thread's mutex
-        std::unique_lock<std::mutex> lk(wt->mutex);
-
-        // check the condition once and set can_update = false if it does not hold.
-        can_update = (inside_bounds(counter + value) and wt->first) or this_queue.is_clearing();
-
-        // Update counter if the condition holds.
+        auto g = this_queue.returning_guard([&]() { return inside_bounds(counter + value); });
+        can_update = g.can_update();
         if (can_update)
             counter += value;
-        assert((inside_bounds(counter)) or this_queue.is_clearing());
     }
-
-    // Pop the thread from the queue.
-    this_queue.pop();
 
     // Notify the other queue.
     // (maybe the operation has released or acquired enough resources for a thread on the other queue)
-    other_queue.notify_first();
+    other_queue.notify();
 
     return can_update;
 
